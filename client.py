@@ -2,95 +2,85 @@ import requests
 import json
 import sys
 
-BASE_URL = "http://127.0.0.1:8000"
+# Адреси сервісів
+URLS = {
+    "class": "http://127.0.0.1:8001",
+    "teacher": "http://127.0.0.1:8002",
+    "schedule": "http://127.0.0.1:8003"
+}
 
 def print_json(data):
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
-def menu():
-    print("\n--- CLIENT MENU ---")
-    print("1. [GET] Отримати всі розклади")
-    print("2. [GET] Отримати розклади з фільтром (Query Param)")
-    print("3. [GET] Отримати за ID")
-    print("4. [POST] Створити новий розклад")
-    print("5. [PUT] Оновити розклад")
-    print("6. [DELETE] Видалити розклад")
-    print("7. [GET] Sub-resource: Отримати дні розкладу")
-    print("0. Вихід")
+def get_request(service_name, endpoint):
+    try:
+        res = requests.get(f"{URLS[service_name]}{endpoint}")
+        if res.status_code == 200:
+            print_json(res.json())
+        else:
+            print(f"Error {res.status_code}: {res.text}")
+    except Exception as e:
+        print(f"Connection Error to {service_name}: {e}")
+
+def create_class():
+    name = input("Class Name (e.g. 10-A): ")
+    profile = input("Profile (e.g. Math): ")
+    data = {"name": name, "profile": profile}
+    try:
+        res = requests.post(f"{URLS['class']}/classes", json=data)
+        print_json(res.json())
+    except Exception as e: print(e)
+
+def create_schedule():
+    print("\n--- Creating Schedule ---")
+    try:
+        class_id = int(input("Enter Class ID (must exist in Class Service): "))
+        # Спрощені дані для тесту
+        data = {
+            "classId": class_id,
+            "daySchedules": [
+                {
+                    "dayOfWeek": "Monday",
+                    "lessons": [
+                        {
+                            "subjectName": "Math",
+                            "teacherName": "Mr. Smith",
+                            "room": "101",
+                            "startTime": "09:00",
+                            "endTime": "10:30"
+                        }
+                    ]
+                }
+            ]
+        }
+        res = requests.post(f"{URLS['schedule']}/schedules", json=data)
+        if res.status_code == 200:
+            print("Success! Schedule created.")
+            print_json(res.json())
+        else:
+            print(f"Server Error: {res.status_code}")
+            print(res.text)
+    except Exception as e:
+        print(f"Error: {e}")
 
 def main():
     while True:
-        menu()
-        choice = input("Ваш вибір: ")
+        print("\n--- MICROSERVICES CLIENT ---")
+        print("1. [Class Service] List Classes")
+        print("2. [Class Service] Create Class")
+        print("3. [Teacher Service] List Teachers")
+        print("4. [Schedule Service] List Schedules")
+        print("5. [Schedule Service] Create Schedule (Will check Class Service!)")
+        print("0. Exit")
         
-        try:
-            if choice == '1':
-                res = requests.get(f"{BASE_URL}/schedules")
-                print_json(res.json())
-
-            elif choice == '2':
-                c_name = input("Введіть назву класу для пошуку (напр. 10A): ")
-                # Вимога: фільтрація через Query Parameters 
-                res = requests.get(f"{BASE_URL}/schedules", params={"class_name": c_name})
-                print_json(res.json())
-
-            elif choice == '3':
-                sid = input("ID: ")
-                res = requests.get(f"{BASE_URL}/schedules/{sid}")
-                if res.status_code == 200:
-                    print_json(res.json())
-                else:
-                    print(f"Error: {res.status_code} - {res.text}")
-
-            elif choice == '4':
-                sid = int(input("Новий ID: "))
-                cname = input("Клас: ")
-                data = {
-                    "id": sid,
-                    "className": cname,
-                    "daySchedules": []
-                }
-                res = requests.post(f"{BASE_URL}/schedules", json=data)
-                print(f"Status: {res.status_code}")
-                print_json(res.json())
-
-            elif choice == '5':
-                sid = int(input("ID для оновлення: "))
-                new_name = input("Нова назва класу: ")
-                data = {
-                    "id": sid,
-                    "className": new_name,
-                    "profile": "Updated Profile",
-                    "daySchedules": []
-                }
-                # Вимога: HTTP PUT 
-                res = requests.put(f"{BASE_URL}/schedules/{sid}", json=data)
-                print(f"Status: {res.status_code}")
-                if res.status_code == 200:
-                    print_json(res.json())
-                else:
-                    print(res.text)
-
-            elif choice == '6':
-                sid = input("ID для видалення: ")
-                # Вимога: HTTP DELETE 
-                res = requests.delete(f"{BASE_URL}/schedules/{sid}")
-                print(f"Status: {res.status_code}")
-                print_json(res.json())
-
-            elif choice == '7':
-                sid = input("ID розкладу: ")
-                # Вимога: Sub-resource 
-                res = requests.get(f"{BASE_URL}/schedules/{sid}/days")
-                if res.status_code == 200:
-                    print_json(res.json())
-                else:
-                    print(res.text)
-
-            elif choice == '0':
-                break
-        except Exception as e:
-            print(f"Connection error: {e}")
+        choice = input("Choice: ")
+        
+        if choice == '1': get_request('class', '/classes')
+        elif choice == '2': create_class()
+        elif choice == '3': get_request('teacher', '/teachers')
+        elif choice == '4': get_request('schedule', '/schedules')
+        elif choice == '5': create_schedule()
+        elif choice == '0': sys.exit()
 
 if __name__ == "__main__":
     main()
