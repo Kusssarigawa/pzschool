@@ -1,63 +1,55 @@
-from fastapi import FastAPI, HTTPException, APIRouter
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
 import uvicorn
+import httpx
+import threading
+import time
 
-app = FastAPI(title="Teacher Service", version="1.0.0")
+app = FastAPI(title="Teacher Service")
 
-# --- DTOs ---
-class TeacherBase(BaseModel):
-    fullName: str
-    subjectSpecialization: str
+SERVICE_NAME = "teacher-service"
+SERVICE_PORT = 8002
+DISCOVERY_URL = "http://127.0.0.1:8000"
 
-class Teacher(TeacherBase):
+def register_in_discovery():
+    while True:
+        try:
+            with httpx.Client() as client:
+                client.post(f"{DISCOVERY_URL}/register", json={
+                    "name": SERVICE_NAME,
+                    "host": "127.0.0.1",
+                    "port": SERVICE_PORT
+                })
+        except Exception: pass
+        time.sleep(10)
+
+@app.on_event("startup")
+async def startup_event():
+    thread = threading.Thread(target=register_in_discovery, daemon=True)
+    thread.start()
+
+class Teacher(BaseModel):
     id: int
+    fullName: str
+    subject: str
 
-# --- Repository ---
-class TeacherRepository:
-    def __init__(self):
-        self._db = [
-            Teacher(id=1, fullName="Mr. Johnson", subjectSpecialization="History"),
-            Teacher(id=2, fullName="Mrs. Smith", subjectSpecialization="Math")
-        ]
+db = [Teacher(id=1, fullName="Mr. Johnson", subject="History")]
+
+@app.get("/teachers", response_model=List[Teacher])
+def get_all(): return db
+
+@app.post("/teachers")
+def create(data: Teacher):
+    # АВТОМАТИЧНА ГЕНЕРАЦІЯ ID
+    # Беремо ID останнього вчителя і додаємо 1. Якщо список порожній - ставимо 1.
+    new_id = db[-1].id + 1 if db else 1
     
-    def get_all(self): return self._db
-    def get_by_id(self, id: int): return next((t for t in self._db if t.id == id), None)
-    def add(self, data: TeacherBase):
-        new_id = self._db[-1].id + 1 if self._db else 1
-        new_obj = Teacher(id=new_id, **data.dict())
-        self._db.append(new_obj)
-        return new_obj
-
-# --- Service ---
-class TeacherService:
-    def __init__(self, repo: TeacherRepository):
-        self.repo = repo
+    # Переписуємо ID в об'єкті
+    data.id = new_id
     
-    def get_all(self): return self.repo.get_all()
-    
-    def get_one(self, id: int):
-        t = self.repo.get_by_id(id)
-        if not t: raise HTTPException(404, "Teacher not found")
-        return t
-    
-    def create(self, data: TeacherBase): return self.repo.add(data)
-
-# --- Controller ---
-repo = TeacherRepository()
-service = TeacherService(repo)
-router = APIRouter(prefix="/teachers", tags=["Teachers"])
-
-@router.get("", response_model=List[Teacher])
-def get_teachers(): return service.get_all()
-
-@router.get("/{id}", response_model=Teacher)
-def get_teacher(id: int): return service.get_one(id)
-
-@router.post("", response_model=Teacher)
-def create_teacher(data: TeacherBase): return service.create(data)
-
-app.include_router(router)
+    db.append(data)
+    return data
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8002)
+    uvicorn.run(app, host="127.0.0.1", port=SERVICE_PORT)

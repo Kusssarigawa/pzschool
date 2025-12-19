@@ -1,97 +1,81 @@
-from fastapi import FastAPI, HTTPException, APIRouter
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-import requests
 import uvicorn
+import httpx
+import threading
+import time
+import random
 
-app = FastAPI(title="Schedule Service", version="1.0.0")
+app = FastAPI(title="Schedule Service")
 
-# Конфігурація інших сервісів
-CLASS_SERVICE_URL = "http://127.0.0.1:8001"
+SERVICE_NAME = "schedule-service"
+SERVICE_PORT = 8003
+DISCOVERY_URL = "http://127.0.0.1:8000"
 
-# --- DTOs ---
-class Lesson(BaseModel):
-    subjectName: str
-    teacherName: str
-    room: str
-    startTime: str
-    endTime: str
+# --- Registration ---
+def register_in_discovery():
+    while True:
+        try:
+            with httpx.Client() as client:
+                client.post(f"{DISCOVERY_URL}/register", json={
+                    "name": SERVICE_NAME,
+                    "host": "127.0.0.1",
+                    "port": SERVICE_PORT
+                })
+        except Exception: pass
+        time.sleep(10)
 
-class DaySchedule(BaseModel):
-    dayOfWeek: str
-    lessons: List[Lesson]
+@app.on_event("startup")
+async def startup_event():
+    threading.Thread(target=register_in_discovery, daemon=True).start()
+
+# --- Logic with Inter-service Communication ---
 
 class ScheduleBase(BaseModel):
-    classId: int  # Зв'язок з сервісом класів за ID
-    daySchedules: List[DaySchedule]
+    classId: int
+    day: str
+    lessons: List[str]
 
 class Schedule(ScheduleBase):
     id: int
-    className: Optional[str] = None # Це поле ми заповнимо, діставши дані з іншого сервісу
+    className: Optional[str] = None 
 
-# --- Repository ---
-class ScheduleRepository:
-    def __init__(self):
-        self._db = []
-    
-    def get_all(self): return self._db
-    def get_by_id(self, id: int): return next((s for s in self._db if s.id == id), None)
-    def add(self, data: ScheduleBase, class_name: str):
-        new_id = self._db[-1].id + 1 if self._db else 1
-        # Створюємо об'єкт і зберігаємо назву класу, яку отримали з мікросервісу
-        new_obj = Schedule(id=new_id, className=class_name, **data.dict())
-        self._db.append(new_obj)
-        return new_obj
+db = []
 
-# --- Service (Inter-service communication here) ---
-class ScheduleService:
-    def __init__(self, repo: ScheduleRepository):
-        self.repo = repo
-    
-    def validate_class_exists(self, class_id: int) -> str:
-        """
-        Синхронний виклик до Class Service (8001).
-        Повертає назву класу або викликає помилку.
-        """
-        try:
-            response = requests.get(f"{CLASS_SERVICE_URL}/classes/{class_id}")
-            if response.status_code == 200:
-                class_data = response.json()
-                return class_data['name']
-            else:
-                raise HTTPException(status_code=400, detail=f"Class with ID {class_id} does not exist in ClassService")
-        except requests.exceptions.ConnectionError:
-            raise HTTPException(status_code=503, detail="Class Service is unavailable")
-
-    def create_schedule(self, data: ScheduleBase):
-        # 1. Мікросервісна взаємодія: перевірка класу
-        class_name = self.validate_class_exists(data.classId)
+async def get_class_name(class_id: int) -> str:
+    """
+    Звертаємось до Discovery, щоб знайти адресу Class Service,
+    а потім робимо запит до нього.
+    """
+    async with httpx.AsyncClient() as client:
+        # 1. Запит до Discovery
+        discovery_resp = await client.get(f"{DISCOVERY_URL}/services/class-service")
+        if discovery_resp.status_code != 200:
+            raise HTTPException(503, "Class Service discovery failed")
         
-        # 2. Якщо все ок, зберігаємо
-        return self.repo.add(data, class_name)
+        # 2. Вибір екземпляра (Client-side Load Balancing)
+        instances = discovery_resp.json()
+        target = random.choice(instances)
+        url = f"http://{target['host']}:{target['port']}/classes/{class_id}"
+        
+        # 3. Запит до Class Service
+        class_resp = await client.get(url)
+        if class_resp.status_code == 200:
+            return class_resp.json()['name']
+        return "Unknown Class"
 
-    def get_all(self): return self.repo.get_all()
-    def get_one(self, id: int):
-        s = self.repo.get_by_id(id)
-        if not s: raise HTTPException(404, "Schedule not found")
-        return s
+@app.get("/schedules", response_model=List[Schedule])
+def get_all(): return db
 
-# --- Controller ---
-repo = ScheduleRepository()
-service = ScheduleService(repo)
-router = APIRouter(prefix="/schedules", tags=["Schedules"])
-
-@router.get("", response_model=List[Schedule])
-def get_schedules(): return service.get_all()
-
-@router.post("", response_model=Schedule)
-def create_schedule(data: ScheduleBase):
-    return service.create_schedule(data)
-
-@router.get("/{id}", response_model=Schedule)
-def get_schedule(id: int): return service.get_one(id)
-
-app.include_router(router)
+@app.post("/schedules", response_model=Schedule)
+async def create(data: ScheduleBase):
+    # Отримуємо назву класу через мікросервісний виклик
+    class_name = await get_class_name(data.classId)
+    
+    new_obj = Schedule(id=len(db)+1, className=class_name, **data.dict())
+    db.append(new_obj)
+    return new_obj
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8003)
+    uvicorn.run(app, host="127.0.0.1", port=SERVICE_PORT)
